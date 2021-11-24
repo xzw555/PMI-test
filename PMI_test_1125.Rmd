@@ -1,0 +1,151 @@
+---
+title: "Untitled"
+author: "Zhiwei Xu"
+date: "2021/11/24"
+output: html_document
+---
+
+```{r}
+########## PMI testing function ############
+PMI_TEST_row1 <- function(CO,n,len,q,d){
+  f = min(d,100)
+  t1 = len*q - q*(q+1)/2
+  tn = 2*t1*n
+  p_oc <- apply(CO[1:f,],1 ,sum)/tn
+  w = 1
+  tw = (2*p_oc[w]-1)/(2*t1*p_oc[w])
+  cov_1 <- sapply(1:f, function(w2) (1-p_oc[w]-p_oc[w2]+2*p_oc[w]*p_oc[w2])/(2*t1*p_oc[w]*p_oc[w2]))
+  cov_1[w] = (1-p_oc[w])^2/(t1*p_oc[w]^2)
+  cov_1 <- len/d^2*cov_1
+  quatil = rep(0,f)
+  for(i in 1:f){
+    quatil[i] <- qnorm(0.95, mean = 0, sd = sqrt(cov_1[i]))
+  }
+  return(quatil) #a list of length 2d
+}
+coocur_cal_row1 <- function(wd_seq, d ,q = 1,f){ #input one patient's time series data, output the co-occurrence matrix
+  co_m <- matrix(0,d,d)
+  l <- length(wd_seq)
+  for (i in 1:(l-1)) {
+    for (j in 1:min(q,l-i)) {
+      a = wd_seq[i]
+      b = wd_seq[i+j]
+      if(a == b){
+        co_m[a,a] <- co_m[a,a] + 2 
+      }else{
+        co_m[a,b] <- co_m[a,b] + 1
+        co_m[b,a] <- co_m[b,a] + 1
+      }
+    }
+  }
+  co_m <- co_m[(1:f),]
+  return(co_m)
+}
+SPPMI_calc_row1 <- function(coocur,f,len,q,n){
+  #co-occur matrix is symmetric
+  r <- rowSums(coocur)
+  c <- (2*q*len - q^2 -q)*n #total co-occurrence
+  SPPMI <- rep(0,f)
+  for (j in 1:f) {
+    SPPMI[j] = log(max(1e-3, c*coocur[1,j]/(r[1]*r[j])))
+  }
+  return(SPPMI)
+}
+```
+
+```{r}
+############################## Generate n patients' word sequence and estimate V ###########################################
+set.seed(1223)
+d <- 20                                                             #number of words
+n <- 500                                                            #number of patients
+p <- floor(log(d)^2) + 1                                            #dimension of word vector
+q <- 30                                                             #window size
+c_len <- 200                                                        #length of time series for each patient
+f = min(d,100)
+alpha <- 1 - log(d)/(p^2)
+V <- matrix(0, nrow = d, ncol = p)                #V is d*p matrix
+a = d%/%p
+for(i in 1:p){
+  V[((i-1)*a+1):(i*a),i] <- sqrt(p)
+  if((p*a)<d){
+    V[((p*a+1):d),1] <- sqrt(p)
+  }
+}
+I = V %*% t(V)/p
+I = I[1,(1:f)]
+c_len_tmp <- c_len + 100
+
+t = rep(0,f)
+s = rep(0,f)
+t2 = rep(0,f)
+s2 = rep(0,f)
+for(y in 1:200){
+  if((y<4)|((y%%100)<1)){
+    cat(y/2,"% \n")
+  }
+  total_seq <- matrix(0, nrow = n, ncol = c_len_tmp)                      #n * c_len
+  s1 <- diag(p)/p
+  for (l in 1:n) {                                                    #generate n independent word sequences with same length c_len
+    z <- rep(0,p)
+    for(i in 1:c_len_tmp){
+      r <- mvrnorm(n = 1, mu=rep(0,p), Sigma = s1)
+      z <- sqrt(alpha)*z + sqrt(1-alpha)*r
+      c <- z/norm(as.matrix(z),type = 'f')
+      se <- apply(V,MARGIN = 1,function(x) exp(sum(c*x)))
+      total_seq[l,i] <- sample(1:d, 1, replace = T, prob = se/sum(se))
+    }
+    rm(se)
+    rm(c)
+    rm(z)
+    rm(r)
+  }
+  total_seq = total_seq[,-(1:100)]                                    #desert first 100 words to approximate stationary process
+  co2 <- matrix(0,f,d)
+  if(n == 1){
+    tmp2 <- total_seq
+    tmp3 <- coocur_cal_row1(tmp2, d, q,f)
+    co2 <-  tmp3
+  }else{
+    for (j in 1:n) {
+      tmp2 <- total_seq[j,] 
+      tmp3 <- coocur_cal_row1(tmp2, d, q,f)
+      co2 <-  co2 + tmp3
+    }
+  }
+  rm(tmp2)
+  rm(tmp3)
+  rm(total_seq)
+  if(0 %in% rowSums(co2)){
+    stop("Invalid co-occurrence matrix!")
+  }
+  SP_est0 <- SPPMI_calc_row1(coocur = co2,f,c_len,q,n)                                 #SP_est0 is the merged SPPMI matrix
+  SP_std = sqrt(n*c_len)/d*SP_est0
+  #rm(SP_est0)
+  output = PMI_TEST_row1(co2,n,c_len,q,d)
+  #rm(co2)
+  for(i in 1:f){
+    if((SP_std[i] > output[i]) & (I[i] < 0.1)){
+      t[i] <- t[i]+1
+    }
+    if((SP_std[i] <= output[i]) & (I[i] > 0.1)){
+      s[i] <- s[i]+1
+    }
+    if((abs(SP_std[i]) > output[i]) & (I[i] < 0.1)){
+      t2[i] <- t2[i]+1
+    }
+    if((abs(SP_std[i]) <= output[i]) & (I[i] > 0.1)){
+      s2[i] <- s2[i]+1
+    }
+  }
+}
+t/200
+s/200
+t2/200
+s2/200
+```
+
+
+
+
+
+
